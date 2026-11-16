@@ -5,7 +5,7 @@
     {
       "schema_version": "1.0.0",
       "id": "tissuelab",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "name": "TissueLab",
       "tagline": "Explore CT-derived body wall mechanics with interactive grips",
       "maintainer": "dylanrussellmd",
@@ -19,9 +19,9 @@
         "files": "Load body wall files and install the SciPy solver",
         "network": "Download SciPy when you choose Install solver"
       },
-      "archive_url": "./tissuelab-0.2.2.zip",
-      "archive_size": 33418,
-      "archive_hash": "sha256:d8d59f7ab58ecb4891ccdf5c6a3d98ce90383d9c409629d74688f2367fe244eb"
+      "archive_url": "./tissuelab-0.2.3.zip",
+      "archive_size": 33491,
+      "archive_hash": "sha256:521fc66a754781f3b758fed90205a1c54e2279b0036f707a079e7a656d747f7b"
     }
   ]
 }

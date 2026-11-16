@@ -12,7 +12,7 @@ Sidebar (N) → TissueLab:
 bl_info = {
     "name": "TissueLab",
     "author": "dylanrussellmd",
-    "version": (0, 2, 2),
+    "version": (0, 2, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > TissueLab",
     "description": "Patient body wall from CT, simulated live by tissue layer mechanics",
@@ -340,7 +340,7 @@ if bpy is not None:
             return {"FINISHED"}
 
     class TISSUELAB_OT_live(bpy.types.Operator):
-        """One timer per scene; accept only its events and sleep at equilibrium."""
+        """One timer per scene; rate-limit TIMER events and sleep at equilibrium."""
         bl_idname = "tissuelab.live"
         bl_label = "Live"
         _timer = None
@@ -364,7 +364,9 @@ if bpy is not None:
             if event.type == "ESC" and _grab_operator is None:
                 scene.tissuelab_live = False
                 return self.finish(context)
-            if event.type != "TIMER" or event.timer != self._timer:
+            # Blender's RNA Event has no timer identity. Other tools can emit TIMER
+            # events too; use a monotonic deadline instead of accessing Event.timer.
+            if event.type != "TIMER":
                 return {"PASS_THROUGH"}
             if time.perf_counter() < self._next_tick:
                 return {"PASS_THROUGH"}
@@ -390,7 +392,7 @@ if bpy is not None:
                     sess.display_tether_stats = sess.tether_stats()
                     self._next_stats = time.perf_counter() + .2
                 elapsed = time.perf_counter() - start
-                self._next_tick = time.perf_counter() + 1 / 60
+                self._next_tick = max(start + 1 / 30, time.perf_counter() + 1 / 60)
                 scene.tissuelab_status = (("Tissue limit reached" if sess.limit_reached else f"max move {move * 1000:.2f} mm")
                                           + f" | update {elapsed * 1000:.0f} ms")
                 if context.area:

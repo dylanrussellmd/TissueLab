@@ -33,7 +33,9 @@ def ui(monkeypatch):
     return module
 
 
-def test_live_filters_timers_sleeps_and_wakes_on_target_change(ui):
+def test_live_accepts_rna_events_without_timer_and_rate_limits_updates(ui):
+    clock = [100.]
+    ui.time = NS(perf_counter=lambda: clock[0])
     scene = NS(as_pointer=lambda: 1, tissuelab_live=False, tissuelab_iters=3)
     sess = NS(solver=object(), step=Mock(return_value=0.), limit_reached=False, tether_stats=lambda: {})
     ui._session = lambda sc: sess
@@ -46,19 +48,27 @@ def test_live_filters_timers_sleeps_and_wakes_on_target_change(ui):
     assert op.execute(ctx) == {'RUNNING_MODAL'}
     assert ui.TISSUELAB_OT_live().execute(ctx) == {'FINISHED'}
     assert wm.event_timer_add.call_count == 1
-    op.modal(ctx, NS(type='TIMER', timer=object()))
+    op.modal(ctx, NS(type='MOUSEMOVE'))
     assert sess.step.call_count == 0
+    op.modal(ctx, NS(type='TIMER'))
+    assert sess.step.call_count == 1
+    for _ in range(10):
+        op.modal(ctx, NS(type='TIMER'))
+    assert sess.step.call_count == 1  # Other tools' timers cannot trigger a burst.
+    clock[0] += .01
+    op.modal(ctx, NS(type='TIMER'))
+    assert sess.step.call_count == 1
     for _ in range(8):
-        op._next_tick = 0
-        op.modal(ctx, NS(type='TIMER', timer=op._timer))
+        clock[0] += .04
+        op.modal(ctx, NS(type='TIMER'))
     assert sess.step.call_count == 3
     assert sess.step.call_args_list[0].args[1] == 1
     matrix[0, 3] = .01
     op._next_tick = 0
-    op.modal(ctx, NS(type='TIMER', timer=op._timer))
+    op.modal(ctx, NS(type='TIMER'))
     assert sess.step.call_count == 4
     scene.tissuelab_live = False
-    assert op.modal(ctx, NS(type='TIMER', timer=op._timer)) == {'FINISHED'}
+    assert op.modal(ctx, NS(type='TIMER')) == {'FINISHED'}
     wm.event_timer_remove.assert_called_once()
     assert not ui._live_operators
 
