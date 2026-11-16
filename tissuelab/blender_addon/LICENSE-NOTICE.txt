@@ -1,0 +1,6 @@
+TissueLab
+Copyright (C) 2026 dylanrussellmd
+
+This extension and its Python source are licensed under GPL-3.0-or-later.
+See COPYING for the full license and warranty disclaimer. SciPy and NumPy are
+not bundled and retain their own licenses.

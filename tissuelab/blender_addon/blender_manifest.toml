@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "tissuelab"
+version = "0.2.0"
+name = "TissueLab"
+tagline = "Explore CT-derived body wall mechanics with interactive grips"
+maintainer = "dylanrussellmd"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+website = "https://github.com/dylanrussellmd/TissueLab"
+
+[permissions]
+files = "Load body wall files and install the SciPy solver"
+network = "Download SciPy when you choose Install solver"
