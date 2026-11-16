@@ -66,3 +66,10 @@ available. Source updates and Blender extension releases are explicit, separate 
 GPL-3.0-or-later; see [LICENSE](LICENSE) and [COPYING](COPYING). NumPy and SciPy are external
 dependencies with their own licenses. No patient data, catalog assets, or private SurgVid
 history are included.
+
+## Tether quality checks
+
+Version 0.2.1 adds taut-connection counts, peak estimated tether tension, and a hard-stop
+warning. New SurgVid wall builds also expose rest-length ranges and the main reason for
+uncovered skin area. See [the validation procedure](docs/tether-validation.md) before
+adjusting strength or considering a separate Scarpa's fascia layer.

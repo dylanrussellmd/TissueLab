@@ -80,3 +80,34 @@ def test_embedded_endpoints_with_shared_vertices_scatter_correctly():
     force = s.L @ x - s._rhs(x, None)
     assert np.allclose(force[:, 0], [-5., 0., 5.])
     assert np.allclose(force.sum(0), 0)
+
+
+def test_sideways_pull_has_axial_tension_and_smooth_slack_onset():
+    v, s = connection()
+    for y in (0., .2, np.sqrt(1.1**2 - 1), .6):
+        x = v.copy()
+        x[1, 1] = y
+        length = np.linalg.norm(x[1])
+        expected = 100 * max(length - 1.1, 0) * x[1] / length
+        force = s.L @ x - s._rhs(x, None)
+        assert np.allclose(force[1], expected, atol=1e-12)
+        assert np.allclose(force[0], -expected, atol=1e-12)
+    for epsilon in (-1e-7, 0, 1e-7):
+        x = v.copy()
+        x[1, 0] = 1.1 + epsilon
+        force = s.L @ x - s._rhs(x, None)
+        assert abs(force[1, 0]) <= 1.01e-5
+
+
+def test_loading_and_unloading_recover_same_equilibrium_before_hard_stop():
+    v = np.array([[0., 0., 0.], [1., 0., 0.]])
+    s = Solver(v, fixed=[True, False], attachment_ids=[1], attachment_weights=[20.],
+               tether_nodes=[[0, 1]], tether_coefficients=[[-1., 1.]],
+               tether_stiffness=[100.], tether_slack=[1.1])
+    x = v.copy()
+    for target in (1., 1.05, 1.1, 1.2, 1.4, 1.2, 1.1, 1.05, 1.):
+        x, _, _ = s.solve(x, attachment_targets=[[target, 0., 0.]], iters=1000, tol=1e-12)
+        expected = target if target <= 1.1 else (20*target + 100*1.1)/120
+        assert x[1, 0] == pytest.approx(expected, abs=1e-8)
+        assert not s.limit_reached
+    assert np.allclose(x, v, atol=1e-8)

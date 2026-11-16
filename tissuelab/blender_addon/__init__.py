@@ -13,7 +13,7 @@ Sidebar (N) → TissueLab:
 bl_info = {
     "name": "TissueLab",
     "author": "dylanrussellmd",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > TissueLab",
     "description": "Patient body wall from CT, simulated live by tissue layer mechanics",
@@ -408,6 +408,18 @@ if bpy is not None:
                 coverage = report.get("covered_area_m2", 0) / max(report.get("skin_area_m2", 0), 1e-30)
                 col.label(text=f"Tethers: {len(sess.tether_tets)} ({coverage:.0%} skin coverage)")
                 col.label(text="Tethering active" if sess.tethering and sess.tether_modulus > 0 and len(sess.tether_tets) else "Tethering inactive")
+                lengths = report.get("rest_length_mm")
+                if lengths:
+                    col.label(text=f"Rest lengths: {lengths['min']:.1f}–{lengths['max']:.1f} mm")
+                excluded = report.get("rejected_area_m2", {})
+                if excluded:
+                    reason = max(excluded, key=excluded.get)
+                    col.label(text="Largest uncovered cause: " + reason.replace("_", " "))
+                ts = sess.tether_stats()
+                col.label(text=f"Taut: {ts['taut']} / {ts['connections']}")
+                col.label(text=f"Peak tether tension: {ts['max_tension_n']:.3f} N (estimated)")
+                if sess.limit_reached:
+                    col.label(text="Hard stop active; tether response may be masked", icon="INFO")
                 col.prop(sc, "tissuelab_show_tethers")
             elif sc.tissuelab_tethering:
                 col.label(text="Rebuild body wall to generate tethers", icon="INFO")

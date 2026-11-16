@@ -76,11 +76,47 @@ class Session:
         self.tether_weights = d["tether_weights"] if "tether_weights" in d else np.empty((0, 2, 4))
         self.tether_area = d["tether_area_m2"] if "tether_area_m2" in d else np.empty(0)
         self.tether_file_present = "tether_tets" in d
+        self._validate_tethers()
         self.handles: list[Handle] = []
         self.solver = None
         self.last_move = 0.0
         Dm = (self.x0[self.tets[:, 1:]] - self.x0[self.tets[:, :1]]).transpose(0, 2, 1)
         self._Dm_inv = np.linalg.inv(Dm)
+
+    def _validate_tethers(self):
+        """Reject malformed connections even when tethering is disabled."""
+        if self.tether_tets.ndim != 2:
+            raise ValueError("invalid tether embedding shape")
+        n = len(self.tether_tets)
+        t, w, a = self.tether_tets, self.tether_weights, self.tether_area
+        if (t.shape != (n, 2) or t.dtype.kind not in "iu"
+                or w.shape != (n, 2, 4) or a.shape != (n,)
+                or (t < 0).any() or (t >= len(self.tets)).any()
+                or not np.isfinite(w).all() or (w < 0).any()
+                or not np.allclose(w.sum(axis=2), 1, atol=1e-8, rtol=0)
+                or not np.isfinite(a).all() or (a <= 0).any()):
+            raise ValueError("invalid tether embeddings or skin patch areas")
+        endpoints = self.tether_positions(rest=True)
+        self.tether_rest_length = np.linalg.norm(endpoints[:, 1] - endpoints[:, 0], axis=1)
+        if not np.isfinite(self.tether_rest_length).all() or (self.tether_rest_length <= 1e-8).any():
+            raise ValueError("invalid tether rest lengths")
+
+    def tether_stats(self):
+        """Constitutive tension, separate from grip forces and the global stretch guard.
+
+        Sum of magnitudes is NOT a resultant force on the wall; forces at the two
+        embedded endpoints are equal and opposite. Disabled tethers carry no force.
+        """
+        rest = self.tether_rest_length
+        p = self.tether_positions()
+        length = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+        extension = np.maximum(length - rest * (1 + self.tether_slack_fraction), 0)
+        k = self.tether_modulus * self.tether_area / rest if self.tethering else np.zeros_like(rest)
+        force = k * extension
+        return {"connections": len(rest), "taut": int((force > 1e-9).sum()),
+                "max_tension_n": float(force.max(initial=0)),
+                "energy_j": float(np.sum(.5 * k * extension**2)),
+                "max_length_ratio": float((length / rest).max(initial=1))}
 
     # ------------------------------------------------------------------ handles
     def grab(self, centre: np.ndarray, radius: float) -> np.ndarray:

@@ -53,3 +53,48 @@ def test_unknown_format_fails_before_reading_geometry(tmp_path, version):
     np.savez(path, format_version=np.asarray(version))
     with pytest.raises(ValueError, match='Unsupported body-wall format'):
         Session(str(path))
+
+
+def tether_wall(path):
+    write_wall(path)
+    with np.load(path) as f:
+        a = dict(f)
+    low, high = np.argmin(a['x'][:, 2]), np.argmax(a['x'][:, 2])
+    ids = [high, low]
+    tet_ids = [np.flatnonzero((a['tets'] == i).any(1))[0] for i in ids]
+    a['tether_tets'] = np.array([tet_ids])
+    a['tether_weights'] = (a['tets'][tet_ids] == np.array(ids)[:, None])[None].astype(float)
+    a['tether_area_m2'] = np.array([.001])
+    return a
+
+
+def test_tether_diagnostics_distinguish_tension_disabled_and_reset(tmp_path):
+    path = tmp_path/'tether.npz'
+    np.savez(path, **tether_wall(path))
+    for enabled in (False, True):
+        s = Session(str(path), tethering=enabled)
+        assert s.tether_stats()['taut'] == 0
+        s.x[:, 2] *= 1.2
+        stats = s.tether_stats()
+        assert stats['taut'] == int(enabled)
+        assert stats['max_tension_n'] == pytest.approx(1. if enabled else 0.)
+        assert stats['energy_j'] == pytest.approx(.002 if enabled else 0.)
+        assert not s.limit_reached
+        s.reset()
+        assert s.tether_stats()['max_tension_n'] == 0
+
+
+@pytest.mark.parametrize('field,value', [
+    ('tether_tets', [[-1, 0]]), ('tether_tets', [[99999, 0]]),
+    ('tether_tets', [[0., 1.]]), ('tether_weights', np.full((1, 2, 4), .5)),
+    ('tether_weights', np.full((1, 2, 4), np.nan)),
+    ('tether_area_m2', [-.001]), ('tether_area_m2', [np.inf]),
+    ('tether_area_m2', []),
+])
+def test_invalid_tether_data_rejected_even_when_disabled(tmp_path, field, value):
+    path = tmp_path/'invalid.npz'
+    a = tether_wall(path)
+    a[field] = np.asarray(value)
+    np.savez(path, **a)
+    with pytest.raises(ValueError, match='invalid tether'):
+        Session(str(path), tethering=False)
