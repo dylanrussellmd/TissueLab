@@ -374,7 +374,11 @@ class Solver:
         if max_stretch is not None:
             if not np.isfinite(max_stretch) or max_stretch <= 1:
                 raise ValueError("max_stretch must be finite and greater than 1")
-            if not self._within_stretch_limit(self._deformation_gradients(x), max_stretch):
+            # A previous accepted result is already checked. Compare values, not identity:
+            # callers can mutate x or fixed targets between interactive updates.
+            cached = getattr(self, "_guard_state", None)
+            known_valid = cached is not None and cached[0] == max_stretch and np.array_equal(cached[1], x)
+            if not known_valid and not self._within_stretch_limit(self._deformation_gradients(x), max_stretch):
                 raise ValueError("initial state or fixed targets exceed the tissue stretch limit")
         xc = x[self.fixed]
         it, dmax = 0, np.inf
@@ -407,6 +411,7 @@ class Solver:
             x[self.free] = new
             if dmax < tol:
                 break
+        self._guard_state = (max_stretch, x.copy()) if max_stretch is not None else None
         return x, it, dmax
 
 

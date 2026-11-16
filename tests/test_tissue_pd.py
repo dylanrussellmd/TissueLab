@@ -210,3 +210,28 @@ def test_hard_limit_measures_strain_not_world_displacement():
     R = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
     moved = v @ R.T + [10., 20., 30.]
     assert s._within_stretch_limit(s._deformation_gradients(moved), 1.1)
+
+
+def test_cached_guard_rechecks_mutated_state_and_stricter_limit():
+    import pytest
+    v, s = membrane_solver(attachment_ids=[1], attachment_weights=[1000.])
+    target = v[[1]] + [.05, 0, 0]
+    x, _, _ = s.solve(v, attachment_targets=target, max_stretch=1.3, iters=10)
+    with pytest.raises(ValueError, match='initial state'):
+        s.solve(x, attachment_targets=target, max_stretch=1.1)
+    x[1, 0] *= 2
+    with pytest.raises(ValueError, match='initial state'):
+        s.solve(x, attachment_targets=target, max_stretch=1.3)
+
+
+def test_cached_guard_matches_uncached_trajectory():
+    v, cached = membrane_solver(attachment_ids=[1], attachment_weights=[1000.])
+    _, uncached = membrane_solver(attachment_ids=[1], attachment_weights=[1000.])
+    a, b = v.copy(), v.copy()
+    for displacement in (.002, .005, .05, .05, 0., 0.):
+        target = v[[1]] + [displacement, 0, 0]
+        uncached._guard_state = None
+        a, _, _ = cached.solve(a, attachment_targets=target, max_stretch=1.3, iters=3)
+        b, _, _ = uncached.solve(b, attachment_targets=target, max_stretch=1.3, iters=3)
+        assert np.array_equal(a, b)
+        assert cached.limit_reached == uncached.limit_reached

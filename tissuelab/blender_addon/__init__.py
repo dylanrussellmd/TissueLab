@@ -4,16 +4,15 @@ drag it with handles, the tissue responding live by its measured layers and mech
 Sidebar (N) → TissueLab:
 1. Install solver (once): SciPy into Blender's user modules (matching Blender's NumPy).
 2. Load body wall: a body_wall_h*.npz.
-3. Put the 3D cursor on the tissue (Shift + right-click), Add handle: an empty that holds the
-   tissue within its radius.
-4. Live: on. Move or rotate the handles (G / R); the wall follows. Esc or Live off stops.
+3. Grab tissue: click and hold a surface, drag in the view plane, release to let go.
+4. Alternatively add a persistent handle at the cursor, enable Live, and use G / R.
 5. Reset: back to the CT shape, handles removed.
 """
 
 bl_info = {
     "name": "TissueLab",
     "author": "dylanrussellmd",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > TissueLab",
     "description": "Patient body wall from CT, simulated live by tissue layer mechanics",
@@ -23,6 +22,7 @@ bl_info = {
 import os
 import subprocess
 import sys
+import time
 
 try:
     import bpy
@@ -37,6 +37,9 @@ SURFACE_COLOURS = {"skin": (0.80, 0.56, 0.47, 1.0), "peritoneum": (0.86, 0.62, 0
 TISSUE_COLOURS = {"skin": (0.80, 0.56, 0.47, 1.0), "subcutaneous_fat": (0.95, 0.80, 0.35, 1.0),
                   "muscle": (0.55, 0.10, 0.10, 1.0), "deep_fat": (0.98, 0.88, 0.55, 1.0),
                   "bone": (0.93, 0.90, 0.82, 1.0), "cartilage": (0.70, 0.82, 0.95, 1.0)}
+
+_live_operators = {}
+_grab_operator = None
 
 _sessions: dict = {}                       # npz path -> engine.Session
 
@@ -160,6 +163,10 @@ def build_objects(sess):
 def _tether_visibility(self, context):
     ob = bpy.data.objects.get("BW_Tethers")
     if ob is not None:
+        if context.scene.tissuelab_show_tethers:
+            sess = _session(context.scene)
+            if sess is not None:
+                _set_coords(ob, sess.tether_positions().reshape(-1, 3))
         ob.hide_set(not context.scene.tissuelab_show_tethers)
 
 
@@ -190,7 +197,7 @@ def update_objects(sess):
     for ob in _collection().objects:
         if "tissuelab_surface" in ob:
             _set_coords(ob, sess.surface_positions(ob["tissuelab_surface"]))
-        elif "tissuelab_tethers" in ob:
+        elif "tissuelab_tethers" in ob and not ob.hide_get():
             _set_coords(ob, sess.tether_positions().reshape(-1, 3))
         elif "tissuelab_scan_edge" in ob:
             _set_coords(ob, sess.x)
@@ -328,48 +335,190 @@ if bpy is not None:
                     bpy.data.objects.remove(ob)
             if sess is not None:
                 sess.reset()
+                sess.display_tether_stats = sess.tether_stats()
                 update_objects(sess)
             return {"FINISHED"}
 
     class TISSUELAB_OT_live(bpy.types.Operator):
-        """Solve continuously while handles move (Esc to stop)."""
+        """One timer per scene; accept only its events and sleep at equilibrium."""
         bl_idname = "tissuelab.live"
         bl_label = "Live"
         _timer = None
 
-        def modal(self, context, event):
-            scene = context.scene
-            if event.type == "ESC" or not scene.tissuelab_live:
-                scene.tissuelab_live = False
+        def finish(self, context):
+            if self._timer is not None:
                 context.window_manager.event_timer_remove(self._timer)
+                self._timer = None
+            if _live_operators.get(self._key) is self:
+                _live_operators.pop(self._key, None)
+            return {"FINISHED"}
+
+        def modal(self, context, event):
+            import numpy as np
+            if self._timer is None:
                 return {"FINISHED"}
-            if event.type == "TIMER":
+            scene = self._scene
+            if not getattr(scene, "tissuelab_live", False) or _session(scene) is None:
+                return self.finish(context)
+            # A grab owns Esc while it is armed; releasing the grab must not stop relaxation.
+            if event.type == "ESC" and _grab_operator is None:
+                scene.tissuelab_live = False
+                return self.finish(context)
+            if event.type != "TIMER" or event.timer != self._timer:
+                return {"PASS_THROUGH"}
+            if time.perf_counter() < self._next_tick:
+                return {"PASS_THROUGH"}
+            try:
                 sess = _session(scene)
-                if sess is not None:
-                    # Drop handles whose empties were deleted
-                    names = {ob.name for ob in scene.objects if ob.get("tissuelab_handle")}
-                    gone = [h.name for h in sess.handles if h.name not in names]
-                    if gone:
-                        sess.handles = [h for h in sess.handles if h.name not in gone]
-                        sess.solver = None
-                    move = sess.step(handle_matrices(scene), scene.tissuelab_iters)
-                    if move > 1e-6:
-                        update_objects(sess)
-                    scene.tissuelab_status = ("Tissue limit reached" if sess.limit_reached
-                                            else f"max move {move * 1000:.2f} mm")
-                    if context.area:
-                        context.area.tag_redraw()
+                matrices = handle_matrices(scene)
+                changed = (sess is not self._last_session or sess.solver is None
+                           or matrices.keys() != self._last.keys()
+                           or any(not np.array_equal(m, self._last[k]) for k, m in matrices.items()))
+                if changed:
+                    self._quiet = 0
+                if self._quiet >= 3:
+                    return {"PASS_THROUGH"}
+                start = time.perf_counter()
+                # During a drag prioritize input. Additional iterations settle on later ticks.
+                iterations = 1 if changed or (_grab_operator and _grab_operator._handle) else scene.tissuelab_iters
+                move = sess.step(matrices, iterations)
+                if move > 1e-7:
+                    update_objects(sess)
+                self._quiet = self._quiet + 1 if move < 1e-7 else 0
+                self._last, self._last_session = matrices, sess
+                if time.perf_counter() >= self._next_stats or self._quiet >= 3:
+                    sess.display_tether_stats = sess.tether_stats()
+                    self._next_stats = time.perf_counter() + .2
+                elapsed = time.perf_counter() - start
+                self._next_tick = time.perf_counter() + 1 / 60
+                scene.tissuelab_status = (("Tissue limit reached" if sess.limit_reached else f"max move {move * 1000:.2f} mm")
+                                          + f" | update {elapsed * 1000:.0f} ms")
+                if context.area:
+                    context.area.tag_redraw()
+            except Exception as exc:
+                scene.tissuelab_live = False
+                self.report({"ERROR"}, f"Tissue update stopped: {exc}")
+                return self.finish(context)
             return {"PASS_THROUGH"}
 
         def execute(self, context):
             if _session(context.scene) is None:
                 self.report({"ERROR"}, "Load a body wall first")
                 return {"CANCELLED"}
+            self._key = context.scene.as_pointer()
             context.scene.tissuelab_live = True
-            wm = context.window_manager
-            self._timer = wm.event_timer_add(0.05, window=context.window)
-            wm.modal_handler_add(self)
+            if self._key in _live_operators:
+                return {"FINISHED"}
+            self._scene = context.scene
+            self._last, self._last_session = {}, None
+            self._quiet, self._next_tick, self._next_stats = 0, 0., 0.
+            self._timer = context.window_manager.event_timer_add(1 / 30, window=context.window)
+            _live_operators[self._key] = self
+            context.window_manager.modal_handler_add(self)
             return {"RUNNING_MODAL"}
+
+    class TISSUELAB_OT_grab(bpy.types.Operator):
+        bl_idname = "tissuelab.grab"
+        bl_label = "Grab tissue"
+        bl_description = "Click and hold tissue to pull in the view plane; release to let go; Esc exits"
+        _handle = None
+
+        @classmethod
+        def poll(cls, context):
+            return context.area is not None and context.area.type == "VIEW_3D" and _session(context.scene) is not None
+
+        def release(self):
+            if self._handle is not None:
+                try:
+                    self._session.remove_handles([self._handle.name])
+                    bpy.data.objects.remove(self._handle, do_unlink=True)
+                except ReferenceError:  # Reset or scene teardown already removed the empty.
+                    pass
+                self._handle = None
+
+        def finish(self, context):
+            global _grab_operator
+            self.release()
+            self._area.header_text_set(None)
+            context.window.cursor_modal_restore()
+            if _grab_operator is self:
+                _grab_operator = None
+            return {"FINISHED"}
+
+        def invoke(self, context, event):
+            global _grab_operator
+            if _grab_operator is not None:
+                return {"CANCELLED"}
+            self._area = context.area
+            self._region = next(r for r in context.area.regions if r.type == "WINDOW")
+            self._rv3d = context.space_data.region_3d
+            self._session = _session(context.scene)
+            self._scene = context.scene
+            self._handle = None
+            _grab_operator = self
+            self._area.header_text_set("TissueLab: hold left mouse to pull; release to let go; orbit with middle mouse; Esc exits")
+            context.window.cursor_modal_set("CROSSHAIR")
+            bpy.ops.tissuelab.live()
+            context.window_manager.modal_handler_add(self)
+            return {"RUNNING_MODAL"}
+
+        def modal(self, context, event):
+            if _grab_operator is not self:
+                return {"FINISHED"}
+            from bpy_extras import view3d_utils
+            from mathutils import Vector
+            import numpy as np
+            if (_session(self._scene) is not self._session or not self._scene.tissuelab_live
+                    or event.type in {"ESC", "RIGHTMOUSE", "WINDOW_DEACTIVATE"}):
+                return self.finish(context)
+            coord = (event.mouse_x - self._region.x, event.mouse_y - self._region.y)
+            inside = 0 <= coord[0] < self._region.width and 0 <= coord[1] < self._region.height
+            try:
+                if event.type == "LEFTMOUSE" and event.value == "PRESS" and inside and self._handle is None:
+                    origin = view3d_utils.region_2d_to_origin_3d(self._region, self._rv3d, coord)
+                    direction = view3d_utils.region_2d_to_vector_3d(self._region, self._rv3d, coord)
+                    hit, point, normal, face, ob, matrix = self._scene.ray_cast(context.evaluated_depsgraph_get(), origin, direction)
+                    if not hit or not ob.original.get("tissuelab_surface"):
+                        return {"RUNNING_MODAL"}
+                    # Wall coordinates are in world metres. Do not silently grab a displaced display mesh.
+                    if not np.allclose(np.array(ob.matrix_world), np.eye(4)):
+                        self.report({"WARNING"}, "Reload the wall before grabbing a transformed surface")
+                        return {"RUNNING_MODAL"}
+                    self._point = point.copy()
+                    self._normal = self._rv3d.view_rotation @ Vector((0, 0, 1))
+                    handle = bpy.data.objects.new("BW_Direct_Grab", None)
+                    handle.empty_display_type = "SPHERE"
+                    handle.empty_display_size = self._scene.tissuelab_handle_radius
+                    handle.location = point
+                    handle["tissuelab_handle"] = True
+                    _collection().objects.link(handle)
+                    self._handle = handle
+                    context.view_layer.update()
+                    count = self._session.add_handle(handle.name, np.array(point), self._scene.tissuelab_handle_radius,
+                                                     np.array(handle.matrix_world))
+                    if not count:
+                        bpy.data.objects.remove(handle, do_unlink=True)
+                        self._handle = None
+                        self.report({"WARNING"}, "No free tissue here; try a larger handle radius")
+                        return {"RUNNING_MODAL"}
+                    self._handle = handle
+                    return {"RUNNING_MODAL"}
+                if event.type == "LEFTMOUSE" and event.value == "RELEASE" and self._handle is not None:
+                    self.release()
+                    return {"RUNNING_MODAL"}
+                if event.type == "MOUSEMOVE" and self._handle is not None:
+                    origin = view3d_utils.region_2d_to_origin_3d(self._region, self._rv3d, coord)
+                    direction = view3d_utils.region_2d_to_vector_3d(self._region, self._rv3d, coord)
+                    denom = direction.dot(self._normal)
+                    if abs(denom) > 1e-6:
+                        self._handle.location = origin + direction * ((self._point - origin).dot(self._normal) / denom)
+                    return {"RUNNING_MODAL"}
+                if self._handle is not None and event.type in {"MIDDLEMOUSE", "WHEELUPMOUSE", "WHEELDOWNMOUSE"}:
+                    return {"RUNNING_MODAL"}
+            except Exception as exc:
+                self.report({"ERROR"}, f"Grab stopped: {exc}")
+                return self.finish(context)
+            return {"PASS_THROUGH"}
 
     class TISSUELAB_PT_panel(bpy.types.Panel):
         bl_label = "TissueLab"
@@ -415,7 +564,9 @@ if bpy is not None:
                 if excluded:
                     reason = max(excluded, key=excluded.get)
                     col.label(text="Largest uncovered cause: " + reason.replace("_", " "))
-                ts = sess.tether_stats()
+                if not hasattr(sess, "display_tether_stats"):
+                    sess.display_tether_stats = sess.tether_stats()
+                ts = sess.display_tether_stats
                 col.label(text=f"Taut: {ts['taut']} / {ts['connections']}")
                 col.label(text=f"Peak tether tension: {ts['max_tension_n']:.3f} N (estimated)")
                 if sess.limit_reached:
@@ -425,6 +576,8 @@ if bpy is not None:
                 col.label(text="Rebuild body wall to generate tethers", icon="INFO")
             col.separator()
             col.prop(sc, "tissuelab_handle_radius")
+            col.operator("tissuelab.grab", icon="HAND")
+            col.label(text="Hold left mouse to pull; release to let go")
             col.operator("tissuelab.add_handle", icon="EMPTY_AXIS")
             col.label(text=f"Handles: {len(sess.handles)}")
             for h in sess.handles:
@@ -439,7 +592,7 @@ if bpy is not None:
             col.operator("tissuelab.reset", icon="LOOP_BACK")
 
     CLASSES = (TISSUELAB_OT_install_solver, TISSUELAB_OT_load_wall, TISSUELAB_OT_add_handle, TISSUELAB_OT_reset,
-               TISSUELAB_OT_live, TISSUELAB_PT_panel)
+               TISSUELAB_OT_live, TISSUELAB_OT_grab, TISSUELAB_PT_panel)
 
 
 def register():
@@ -466,14 +619,21 @@ def register():
     S.tissuelab_wall_path = StringProperty(name="Body wall file")
     S.tissuelab_handle_radius = FloatProperty(name="Handle radius", default=0.03, min=0.005, max=0.15,
                                             unit="LENGTH")
-    S.tissuelab_iters = IntProperty(name="Iterations per update", default=3, min=1, max=50)
-    S.tissuelab_live = BoolProperty(name="Live", default=False)
+    S.tissuelab_iters = IntProperty(name="Iterations per update", default=1, min=1, max=50)
+    S.tissuelab_live = BoolProperty(name="Live", default=False, options={"SKIP_SAVE"})
     S.tissuelab_status = StringProperty(name="Status", default="")
     for c in CLASSES:
         bpy.utils.register_class(c)
 
 
 def unregister():
+    global _grab_operator
+    if _grab_operator is not None:
+        _grab_operator.finish(bpy.context)
+    for op in list(_live_operators.values()):
+        op._scene.tissuelab_live = False
+        op.finish(bpy.context)
+    _sessions.clear()
     for c in reversed(CLASSES):
         bpy.utils.unregister_class(c)
     S = bpy.types.Scene

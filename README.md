@@ -73,3 +73,27 @@ Version 0.2.1 adds taut-connection counts, peak estimated tether tension, and a 
 warning. New SurgVid wall builds also expose rest-length ranges and the main reason for
 uncovered skin area. See [the validation procedure](docs/tether-validation.md) before
 adjusting strength or considering a separate Scarpa's fascia layer.
+
+## Direct grabbing and responsiveness (0.2.2)
+
+In the TissueLab sidebar, click **Grab tissue**. Press and hold the left mouse button on a
+visible tissue surface, drag, and release to let go. Live starts automatically and continues
+so the released tissue can relax. You can make repeated grabs; press Esc or right-click to
+exit grab mode. Orbit with the middle mouse between grabs. Pulls follow a plane parallel to
+the view at the clicked point: use an oblique or side view to lift skin away from the wall.
+The existing cursor handles remain available for persistent holds or axis-constrained moves.
+Esc exits the tool; it does not restore the pre-grab shape. Reset restores the original wall.
+
+Live now ignores unrelated timer events, avoids duplicate timers, pauses once settled,
+skips hidden tether-line updates, and uses one iteration per update while dragging. The
+default iteration count is now 1 (existing scenes may retain their earlier value). Increase
+it only if you prefer faster settling over input responsiveness. Status includes update time
+in milliseconds; a high value indicates that the mesh still costs too much to solve/update
+in one frame. The first grab may pause while the solver factorizes its attachment matrix.
+For large walls, a coarser wall mesh can help at the cost of geometric/mechanical detail.
+
+A synthetic 6,000-tetrahedron benchmark reduced one warmed solver update from approximately
+38 ms to 25 ms by reusing validation of an unchanged accepted state. Every proposed step
+still passes the original hard-stretch guard; external state edits or a changed limit trigger
+validation again. This is a local CPU measurement, not a patient-mesh viewport FPS promise.
+Modal event/lifecycle tests use an API double; interactive Blender testing is still required.

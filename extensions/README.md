@@ -26,7 +26,7 @@ Save and stop Live simulation before updating; restart Blender and reload your w
 Body-wall NPZ files remain separate. Feature changes requiring new geometry (such as tethers)
 still require rebuilding the NPZ with SurgVid. Extension updates do not install the CT pipeline.
 
-## Version 0.2.1
+## Version 0.2.2
 
 The manifest supports Blender 4.2 and later. Package validation uses Blender 5.2.3 tooling;
 interactive compatibility has not been tested on every Blender version or platform.
