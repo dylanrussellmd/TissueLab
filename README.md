@@ -103,3 +103,14 @@ Modal event/lifecycle tests use an API double; interactive Blender testing is st
 Fixes the Live startup error caused by accessing `Event.timer`, which Blender's RNA Event
 does not expose. A monotonic deadline limits updates even when other tools emit timer
 events. Restart Blender after updating to clear any modal state left by the failed operator.
+
+## Reloading settings (0.2.4)
+
+After changing stiffness, tethering or the hard stretch limit, click **Reload body wall**.
+It rereads the current NPZ without opening a file picker, applies the current settings,
+resets deformation, clears handles, and stops Live while preserving your view. Start Live
+or Grab tissue again afterward. This does not regenerate CT geometry.
+
+Both Load and Reload replace tagged wall objects, including suffixed duplicates and old
+Surgvid-tagged walls; unrelated objects are preserved. A missing or invalid input file is
+checked before the existing wall is removed.

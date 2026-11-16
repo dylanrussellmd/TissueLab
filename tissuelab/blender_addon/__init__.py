@@ -12,7 +12,7 @@ Sidebar (N) → TissueLab:
 bl_info = {
     "name": "TissueLab",
     "author": "dylanrussellmd",
-    "version": (0, 2, 3),
+    "version": (0, 2, 4),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > TissueLab",
     "description": "Patient body wall from CT, simulated live by tissue layer mechanics",
@@ -120,12 +120,6 @@ def _material(name, colour, roughness=0.5):
 
 def _mesh_object(name, verts, faces, materials, face_material=None, smooth=True):
     import numpy as np
-    me = bpy.data.meshes.get(name)
-    if me is not None:
-        ob = bpy.data.objects.get(name)
-        if ob is not None:
-            bpy.data.objects.remove(ob)
-        bpy.data.meshes.remove(me)
     me = bpy.data.meshes.new(name)
     me.from_pydata(np.asarray(verts).tolist(), [], np.asarray(faces).tolist())
     for m in materials:
@@ -161,8 +155,9 @@ def build_objects(sess):
 
 
 def _tether_visibility(self, context):
-    ob = bpy.data.objects.get("BW_Tethers")
-    if ob is not None:
+    for ob in _collection().objects:
+        if not ob.get("tissuelab_tethers"):
+            continue
         if context.scene.tissuelab_show_tethers:
             sess = _session(context.scene)
             if sess is not None:
@@ -173,11 +168,6 @@ def _tether_visibility(self, context):
 def build_tether_object(sess):
     """Inspection lines only; never included in rendering or used as physical geometry."""
     import numpy as np
-    old = bpy.data.objects.get("BW_Tethers")
-    if old is not None:
-        data = old.data
-        bpy.data.objects.remove(old, do_unlink=True)
-        bpy.data.meshes.remove(data)
     pts = sess.tether_positions().reshape(-1, 3)
     if not len(pts):
         return
@@ -242,6 +232,50 @@ def handle_matrices(scene):
     return {ob.name: np.array(ob.matrix_world) for ob in scene.objects if ob.get("tissuelab_handle")}
 
 
+def _clear_wall_objects(scene):
+    """Remove tagged wall objects, including renamed/suffixed duplicates, not name matches."""
+    keys = tuple(prefix + suffix for prefix in ("tissuelab_", "surgvid_")
+                 for suffix in ("surface", "scan_edge", "tethers", "handle"))
+    for ob in list(scene.objects):
+        if not any(key in ob for key in keys):
+            continue
+        mesh = ob.data if ob.type == "MESH" else None
+        bpy.data.objects.remove(ob, do_unlink=True)
+        if mesh is not None and mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+
+
+def _load_wall(context, filepath, frame=True):
+    """Parse first: missing/invalid files leave the current wall and simulation untouched."""
+    sc = context.scene
+    filepath = bpy.path.abspath(filepath)
+    sess = _engine().Session(filepath, handle_stiffness=sc.tissuelab_handle_stiffness,
+                            skin_stretch_limit=sc.tissuelab_skin_limit, max_stretch=sc.tissuelab_max_stretch,
+                            skin_stiffness=sc.tissuelab_skin_stiffness if sc.tissuelab_skin_stiffening else 0.,
+                            tethering=sc.tissuelab_tethering, tether_modulus=sc.tissuelab_tether_modulus,
+                            tether_slack_fraction=sc.tissuelab_tether_slack)
+    # Validate display embeddings before replacing the scene objects.
+    for name in sess.surfaces:
+        sess.surface_positions(name)
+    sess.scan_edge()
+    if _grab_operator is not None:
+        _grab_operator.finish(context)
+    sc.tissuelab_live = False
+    live = _live_operators.get(sc.as_pointer())
+    if live is not None:
+        live.finish(context)
+    old_path = sc.tissuelab_wall_path
+    _clear_wall_objects(sc)
+    build_objects(sess)
+    _sessions.pop(old_path, None)
+    _sessions[filepath] = sess
+    sc.tissuelab_wall_path = filepath
+    sc.tissuelab_status = "Wall loaded with current settings; Live stopped"
+    if frame:
+        _frame_wall(context)
+    return sess
+
+
 # ---------------------------------------------------------------------------- operators
 
 if bpy is not None:
@@ -270,17 +304,12 @@ if bpy is not None:
             if not scipy_available():
                 self.report({"ERROR"}, "Install the solver first (SciPy)")
                 return {"CANCELLED"}
-            sc = context.scene
-            sess = _engine().Session(self.filepath, handle_stiffness=sc.tissuelab_handle_stiffness,
-                                     skin_stretch_limit=sc.tissuelab_skin_limit, max_stretch=sc.tissuelab_max_stretch,
-                                     skin_stiffness=sc.tissuelab_skin_stiffness if sc.tissuelab_skin_stiffening else 0.0,
-                                     tethering=sc.tissuelab_tethering, tether_modulus=sc.tissuelab_tether_modulus,
-                                     tether_slack_fraction=sc.tissuelab_tether_slack)
-            _sessions[self.filepath] = sess
-            context.scene.tissuelab_wall_path = self.filepath
-            build_objects(sess)
+            try:
+                sess = _load_wall(context, self.filepath)
+            except Exception as exc:
+                self.report({"ERROR"}, f"Could not load body wall: {exc}")
+                return {"CANCELLED"}
             hiding = _enclosing_objects(context, sess)
-            _frame_wall(context)
             info = sess.info
             msg = (f"Body wall {info.get('case')}: {len(sess.tets)} elements, {len(sess.x)} vertices, "
                    f"h {info.get('h_mm')} mm (real size, metres)")
@@ -289,6 +318,24 @@ if bpy is not None:
                                                f"{'it' if len(hiding) == 1 else 'them'} to see the body")
             else:
                 self.report({"INFO"}, msg)
+            return {"FINISHED"}
+
+    class TISSUELAB_OT_reload_wall(bpy.types.Operator):
+        bl_idname = "tissuelab.reload_wall"
+        bl_label = "Reload body wall"
+        bl_description = "Reload the current file with current settings; resets deformation and removes handles"
+
+        @classmethod
+        def poll(cls, context):
+            return bool(context.scene.tissuelab_wall_path)
+
+        def execute(self, context):
+            try:
+                _load_wall(context, context.scene.tissuelab_wall_path, frame=False)
+            except Exception as exc:
+                self.report({"ERROR"}, f"Could not reload body wall: {exc}")
+                return {"CANCELLED"}
+            self.report({"INFO"}, "Wall reloaded with current settings; handles cleared and Live stopped")
             return {"FINISHED"}
 
     class TISSUELAB_OT_add_handle(bpy.types.Operator):
@@ -549,6 +596,7 @@ if bpy is not None:
                 col.prop(sc, "tissuelab_tether_slack")
             col.label(text="Settings apply when loading a wall")
             col.operator("tissuelab.load_wall", icon="FILE_FOLDER")
+            col.operator("tissuelab.reload_wall", icon="FILE_REFRESH")
             sess = _session(sc)
             if sess is None:
                 col.label(text="No body wall loaded")
@@ -593,7 +641,7 @@ if bpy is not None:
             col.label(text=sc.tissuelab_status)
             col.operator("tissuelab.reset", icon="LOOP_BACK")
 
-    CLASSES = (TISSUELAB_OT_install_solver, TISSUELAB_OT_load_wall, TISSUELAB_OT_add_handle, TISSUELAB_OT_reset,
+    CLASSES = (TISSUELAB_OT_install_solver, TISSUELAB_OT_load_wall, TISSUELAB_OT_reload_wall, TISSUELAB_OT_add_handle, TISSUELAB_OT_reset,
                TISSUELAB_OT_live, TISSUELAB_OT_grab, TISSUELAB_PT_panel)
 
 

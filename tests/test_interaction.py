@@ -130,3 +130,55 @@ def test_direct_grab_hits_surface_and_starts_at_clicked_point(ui):
     assert op.modal(ctx, event) == {'RUNNING_MODAL'}  # No view changes during a pull.
     op.release()
     assert op.modal(ctx, event) == {'PASS_THROUGH'}  # Orbit between pulls.
+
+
+def test_reload_applies_current_settings_and_stops_interaction(ui):
+    sc = NS(tissuelab_wall_path='/wall.npz', tissuelab_live=True, as_pointer=lambda: 1,
+            tissuelab_handle_stiffness=1000., tissuelab_skin_limit=1.25,
+            tissuelab_max_stretch=1.7, tissuelab_skin_stiffness=500.,
+            tissuelab_skin_stiffening=True, tissuelab_tethering=True,
+            tissuelab_tether_modulus=2000., tissuelab_tether_slack=.2)
+    ctx = NS(scene=sc)
+    sess = NS(surfaces={}, scan_edge=Mock())
+    factory = Mock(return_value=sess)
+    ui._engine = lambda: NS(Session=factory)
+    ui.bpy.path = NS(abspath=lambda path: path)
+    ui._clear_wall_objects, ui.build_objects, ui._frame_wall = Mock(), Mock(), Mock()
+    live, grab = NS(finish=Mock()), NS(finish=Mock())
+    ui._live_operators[1], ui._grab_operator = live, grab
+    ui._sessions['/wall.npz'] = object()
+    assert ui.TISSUELAB_OT_reload_wall().execute(ctx) == {'FINISHED'}
+    assert factory.call_args.kwargs['max_stretch'] == 1.7
+    assert factory.call_args.kwargs['tether_slack_fraction'] == .2
+    assert ui._sessions['/wall.npz'] is sess
+    assert not sc.tissuelab_live
+    live.finish.assert_called_once_with(ctx)
+    grab.finish.assert_called_once_with(ctx)
+    ui._clear_wall_objects.assert_called_once_with(sc)
+    ui._frame_wall.assert_not_called()
+    # Failed parsing leaves the successfully loaded scene untouched.
+    factory.side_effect = FileNotFoundError('missing')
+    assert ui.TISSUELAB_OT_reload_wall().execute(ctx) == {'CANCELLED'}
+    assert ui._sessions['/wall.npz'] is sess
+    assert ui._clear_wall_objects.call_count == 1
+
+
+def test_cleanup_removes_tagged_duplicates_but_preserves_unrelated_objects(ui):
+    class Object(dict):
+        type = 'MESH'
+        def __init__(self, name, props):
+            super().__init__(props)
+            self.name = name
+            self.data = NS(users=0)
+    original = Object('BW_Skin', {'tissuelab_surface': 'skin'})
+    duplicate = Object('BW_Skin.001', {'tissuelab_surface': 'skin'})
+    legacy = Object('renamed', {'surgvid_surface': 'skin'})
+    unrelated = Object('BW_Pleura', {})
+    scene = NS(objects=[original, duplicate, legacy, unrelated])
+    remove = Mock(side_effect=lambda ob, **kw: scene.objects.remove(ob))
+    meshes = Mock()
+    ui.bpy.data = NS(objects=NS(remove=remove), meshes=NS(remove=meshes))
+    ui._clear_wall_objects(scene)
+    assert scene.objects == [unrelated]
+    assert remove.call_count == meshes.call_count == 3
+    assert all(c.kwargs == {'do_unlink': True} for c in remove.call_args_list)
